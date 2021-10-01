@@ -1,0 +1,280 @@
+---
+title: "Predicting Two-Stories Prices in NY"
+author: "Emmanuel Messori"
+date: "30/09/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, tidy = TRUE)
+```
+
+## Objective
+
+In this Project, we will use property sales data from all five boroughs of New York City:
+
+* Bronx
+* Brooklyn
+* Manhattan
+* Staten Island
+* Queens
+
+![](Boroughs of New York City.png)
+
+Our purpose is to explore the following questions:
+
+1. How well does the size of a property (measured in gross square feet) explain or predict sale price across New York City as a whole?
+  + To answer this, we'll explore property sales data for all five boroughs combined.
+2. How well does the size of a property explain or predict sale price for each individual borough?
+  + For this question, we'll build, analyze, and compare linear models for each borough.
+  
+## The Data
+
+We 'll work with [Rolling Sales Data](https://www1.nyc.gov/site/finance/taxes/property-rolling-sales-data.page)
+The Department of Finance’s Rolling Sales files lists properties that sold in the last twelve-month period in New York City for tax class 1, 2, and 4. These files include:
+
+* the neighborhood;
+* building type;
+* square footage;
+* other data.
+
+### Property Sales Terms
+
+A glossary of Property Sales terms explains words and phrases used in each file.
+
+
+ Term        | Meaning     |
+|:-----------|:-------------|
+|Borough     | name of the borough|
+|Neighborhood| name assigned by the dep. of finance |
+|BC Category | broad usage of the property|
+|Tax Class | one of four different tax classes |
+|Block | borough subdivision |
+|Lot | subdivision of a tax block |
+|Easement | right to make limited use of another property |
+|Building Class | [property’s constructive use](https://www1.nyc.gov/assets/finance/jump/hlpbldgcode.html) |
+|Address | street address |
+|Zip Code | postal code |
+|Residential Units |n units |
+|Commercial Units |n units |
+|Total Units | n units |
+|Land Square Feet |land area |
+|Gross Square Feet |total area of all the floors including land area |
+|Year built | year of construction |
+|Sales Price | sale price in $ |
+|$0 Sales Price | transfer without cash consideration ? |
+
+## Cleaning Operations
+
+We will download the latest data available, comprising the sales from September 2020 to August 2021. The data is divided by borough.
+
+```{r}
+library(tidyverse)
+library(readxl)
+
+manhattan <- read_excel("rollingsales_manhattan.xlsx", skip = 4)
+queens <- read_excel("rollingsales_queens.xlsx", skip=4)
+brooklyn <- read_excel("rollingsales_brooklyn.xlsx", skip=4)
+statenisland <- read_excel("rollingsales_statenisland.xlsx", skip=4)
+bronx <-  read_excel("rollingsales_bronx.xlsx", skip=4)
+```
+
+We can then bind the data by row:
+
+```{r}
+NYsales <- bind_rows(manhattan, bronx, brooklyn, queens, statenisland)
+rm(bronx,brooklyn,manhattan,queens,statenisland)
+#col names to lower
+NYsales %>% rename_with(~tolower(gsub(" ","_",.x, fixed = TRUE))) -> NYsales
+#substitute borough number with the respective name for clarity
+NYsales %>% mutate(borough = case_when(borough == 1 ~ "manhattan",
+                                       borough == 2 ~ "bronx",
+                                       borough == 3 ~ "brooklyn",
+                                       borough == 4 ~ "queens",
+                                       borough == 5 ~ "staten_island")) ->NYsales
+
+#convert capitalized text to title
+NYsales %>% mutate(across(c(neighborhood, building_class_category,address), str_to_title)) -> NYsales
+
+```
+
+Let's check now the most popular building classifications:
+
+```{r}
+head(count(NYsales, building_class_at_present, sort = TRUE))
+```
+Checking on the Building Classification reference we can discover the code meaning:
+
+* R4 : CONDO or RESIDENTIAL UNIT IN ELEVATOR BLDG.
+* D4 : ELEVATOR COOPERATIVE
+* A1 : TWO STORIES - DETACHED SM OR MID
+* A5 : ONE FAMILY ATTACHED OR SEMI-DETACHED
+* B1 : TWO FAMILY BRICK
+* B2 : Two Family Frame
+
+
+```{r}
+skimr::skim(NYsales)
+```
+
+We can safely drop the `easement` column given it's empty.
+
+```{r}
+NYsales %>%select(-easement) -> NYsales
+```
+
+We will now :
+
+1. filter out the property exchanges between family members - we assume the threshold to be $10,000.
+2. Remove observations with gross square footage of zero.
+3. Since we're interested in studying the relationship between `gross_square_feet` and `sale_price`, we will drop the NA values present in the first variable.
+
+```{r}
+NYsales %>% filter(sale_price >= 10000 & gross_square_feet !=0) %>% drop_na(gross_square_feet) %>% arrange(borough, neighborhood) -> NYsales_c
+```
+
+The `gross_square_feet` variable has `r nrow(filter(NYsales, is.na(gross_square_feet)))` NAs and `r nrow(filter(NYsales, gross_square_feet == 0))` O values. We have also `r `nrow(filter(NYsales, sale_price < 10000))` transaction of less than 10000$. After filtering for these conditions, the resulting data frame has less than a half of the row of the starting one:
+
+```{r}
+skimr::skim(NYsales_c)
+```
+We will now save the data frame obtained to csv:
+
+```{r}
+write.csv(NYsales_c, 'NYsales_cleaned.csv', row.names = FALSE)
+```
+
+Let's check the classification reference for the filtered data set:
+
+```{r}
+NYsales_c %>% count(building_class_at_time_of_sale, sort = TRUE)
+```
+
+
+After filtering the data, the most popular building class is A1, *Two stories - detached sm or mid". This is due to the fact that as of July, 2020, `gross_square_feet` data is not being collected and/or recorded for the building class R4, "condominiums with elevators". Presumably this is due to the ongoing Covid-19 pandemic.
+
+----
+
+## Correlation between `gross_square_feet` and `sale_price`
+
+To visualize the relationship between to the two variable we will generate a scatter plot faceted by neighborhood:
+
+```{r}
+ggplot(NYsales_c, aes(gross_square_feet, sale_price)) +
+  geom_point() +
+   scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  facet_wrap(~borough, scales = "free") +
+  theme_minimal()
+```
+
+Visualizing the data this way for all the property types is not very meaningful, because we have a very large range of prices and areas. 
+We will therefore concentrate on *two stories* (category A1), which is the most popular building class:
+
+```{r}
+#filter for A1 and remove the only two stories in Manhattan
+NYsales_c %>% filter(building_class_at_time_of_sale == "A1" & borough !="manhattan") -> NY_twostories
+
+NY_twostories %>%
+  ggplot(aes(gross_square_feet, sale_price)) +
+  geom_point(aes(color = borough),alpha=0.5) +
+  geom_smooth(method = "lm", se = FALSE) +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal() +
+  ggtitle("Relationship between gross square feet and price", subtitle = "Two stories")
+```
+
+There is an evident linear relationship between the two variables. Anyway we have some strong outliers in the mid-range area, the majority of them being Brooklyn properties. Let's try to plot again this relationship by excluding sale prices above 3750000:
+
+```{r}
+NY_twostories %>%
+  ggplot(aes(gross_square_feet, sale_price)) +
+  geom_point(aes(color = borough),alpha=0.5) +
+  geom_smooth(method = "lm", se = FALSE) +
+  scale_y_continuous(labels = scales::comma, limits = c(0,3750000)) +
+  theme_minimal() +
+  ggtitle("Relationship between gross square feet and price", subtitle = "Two stories, under 3.75 M") 
+```
+
+Let's now visualize a separated scatter plot for each borough:
+
+```{r}
+NY_twostories %>%
+  ggplot(aes(gross_square_feet, sale_price)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method = "lm", se = FALSE) +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal() +
+  ggtitle("Relationship between gross square feet and price", subtitle = "Two stories") +
+  facet_wrap(~borough, ncol = 2, scales = "free")
+```
+
+In either case we see a strong positive relationship between the two variables.
+
+It doesn't seem we have some specific outliers we can remove. Among Brooklyn properties we have just found a 9000000 estate, which turn out to be estimated 3600000 by [Zillow](https://www.zillow.com/homes/452-Avenue-S_rb/30736225_zpid/):
+
+```{r}
+NY_twostories %>% arrange(desc(sale_price)) %>% head()
+```
+
+## Generating multiple models
+
+We will now use the `map` function with the `nest` and `tidy` functions to generate multiple linear regression models by borough.
+
+```{r}
+library(broom)
+NY_twostories %>% group_by(borough) %>% 
+  nest() %>% mutate(linearmod = map(data, ~lm(sale_price ~ gross_square_feet, data=.))) %>% 
+  mutate(tidycoef = map(linearmod, tidy, conf.int=TRUE)) %>% 
+  select(borough, tidycoef) %>% 
+  unnest(cols = tidycoef) %>% 
+  filter(term=="gross_square_feet") %>% 
+  arrange(desc(estimate))
+```
+
+Some brief remarks on this results. The strongest estimate for the slope coefficient is for Brooklyn. This means that for every square feet, the price increases of about 709 dollars. All of the estimates are statistically significant, with a t-statistic much greater that 2. The most accurate model (the one which has the lowest RSE) is the Staten_island one.
+
+### Model performance
+
+```{r}
+NY_twostories %>% group_by(borough) %>% 
+  nest() %>% mutate(linearmod = map(data, ~lm(sale_price ~ gross_square_feet, data=.))) %>% 
+  mutate(tidycoef = map(linearmod, tidy, conf.int=TRUE)) %>% 
+  mutate(augmented = map2(linearmod, data,  augment)) %>%
+  select(borough, augmented) %>%
+  unnest(augmented) %>% ggplot(aes(gross_square_feet, .resid)) + geom_line() + facet_wrap(~borough, scales = "free") + 
+  ggtitle("Graph of the residuals") + 
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+```
+```{r}
+NY_twostories %>% group_by(borough) %>% 
+  nest() %>% mutate(linearmod = map(data, ~lm(sale_price ~ gross_square_feet, data=.))) %>% 
+  mutate(tidycoef = map(linearmod, tidy, conf.int=TRUE)) %>% 
+  mutate(mod_summary = map(linearmod, glance)) %>%
+  select(borough, mod_summary) %>%
+  unnest(mod_summary) %>%
+  arrange(desc(r.squared))
+```
+
+These linear models, though significant statistically, capture poorly the variability contained in the response variable, with R squared ranging from 0.16 to 0.43. `sigma`, the RSE is also quite strong particularly for the `brooklyn` model, which as we have previously seen has the strongest outliers. A way of improvement would be to fit further models by borough *and* neighborhood, or also to add more predictors.
+
+### Possible improvements
+
+For example, predicting prices with an interaction between the variables neighborhood and gross_square_feet as predictors already produces a much better model:
+
+```{r}
+mod <- lm(sale_price ~ gross_square_feet:neighborhood, data=NY_twostories)
+glance(mod)
+```
+
+Using the model to make a prediction : 
+
+```{r}
+pred <- predict(mod, newdata = data.frame(neighborhood = "Baychester", gross_square_feet = 4374))
+
+realprice <- filter(NY_twostories, neighborhood == "Baychester" & gross_square_feet == 4374) %>% pull(sale_price)
+```
+
+For a two store in Baychester area we predicted `r scales::dollar(pred)` instead of 
+`r scales::dollar(realprice)`, with an error of `r scales::dollar(pred - realprice, largest_with_cents = 0)`.
